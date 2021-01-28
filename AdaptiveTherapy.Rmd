@@ -1,0 +1,533 @@
+---
+title: "Adaptive therapy simulations using OncoSimulR"
+author: "Marta Lozano Prieto, Daniel Prieto Cebollero, Andrea Sánchez de la Cruz"
+date: "`r paste0(Sys.Date(),'. OncoSimulR version ', packageVersion('OncoSimulR'), suppressWarnings(ifelse(length(try(system('git rev-parse --short HEAD', ignore.stderr = TRUE, intern = TRUE))), paste0('. Revision: ', system('git rev-parse --short HEAD', intern = TRUE)), '')))`"
+output:
+  bookdown::html_document2:
+    toc: yes
+    toc_float: yes
+    fig_retina: null
+    fig_caption: yes
+classoption: a4paper
+geometry: margin=3cm
+fontsize: 12pt
+vignette: >
+  %\VignetteIndexEntry{OncoSimulR: Adaptive therapy simulations using OncoSimulR} 
+  %\VignetteEngine{knitr::rmarkdown}  
+  %\VignettePackage{OncoSimulR}  
+  %\VignetteEncoding{UTF-8}  
+  %\VignetteDepends{OncoSimulR}
+---
+```{r setup, include=FALSE}
+time0 <- Sys.time()
+knitr::opts_chunk$set(echo = TRUE, collapse = FALSE)
+options(width = 70)
+require(BiocStyle)
+require(pander)
+library(OncoSimulR)
+```
+
+# Introduction
+
+**Fitness** can be defined as the capacity of a subpopulation of organisms to 
+successfully perpetuate itself in the next generation. Having said that, 
+***frequency-dependent fitness** refers to evolutionary phenomena where the fitness
+of a subpopulation depends on the frequency of other genotypes. Thus, 
+frequency-dependent fitness needs to be considered in situations of commensalism,
+competition, parasitism, predation, mutualism… This is greatly related to what is
+called **“Evolutionary Game theory”** which, taking into account the costs and benefits
+of these multi-individual relationships, studies what their outcome may be.
+The subpopulation with the best interaction strategy will have the highest fitness,
+and thus it will be favoured under natural selection. However, this is a game in the
+sense that each organism’s fitness also depends on the strategies of the other 
+subpopulations involved.
+
+Moreover, the study of evolutionary dynamics can also be applied to contexts of 
+therapy, considering the interactions between the malignant and normal cells. 
+In a targeted entity (a group of bacteria, viruses, or malignant cells) there are
+multiple clones and subclones, with genetic differences, and their fitness will
+depend on their capacities, but also on the subclones’ interactions and 
+competition for specific resources. 
+
+In classical therapy these small groups of cells are not considered and most of 
+our antibiotics and cancer treatments focus on targeting as many cells as possible.
+For example, standard cancer treatment is based on a continuous use of maximum 
+tolerated doses. In many cases, this is an appropriate solution. But in cases where
+cure cannot be found under classical terms, **adaptive therapy** can help patients to
+have a lower morbidity or mortality. In adaptive therapy the doses are administered
+based on the current state of tumour. The heterogeneity of the clones is considered
+in order to avoid situations where potential resistant clones take over the whole 
+system once there is not a competition with the sensitive ones. As its name suggests,
+adaptive therapy is formed of several successive cycles where the clones and 
+subclones are controlled in a loop. 
+
+In order to understand how this therapy worked, we as a group started using 
+`OncoSimulR` package to simulate a general situation of adaptive therapy. Next,
+we looked through literature, and simulated two specific examples of adaptive 
+therapy. The first one, which is based on *Melnikov et al. (2020)*, is a simulation
+of the dynamics within a bacterial population. On the contrary, the second example
+that we chose, which is described in *West et al. (2020)*, was used to model the 
+dynamics of different cell types present in a case of resistant prostate cancer.
+
+## Simulating adaptive therapy: steps
+
+This first simulation is a general, rather theoretical one. In this case, as this
+example is the simplest possible, two cell populations were established: one 
+**sensitive (S)** and one **resistant (R)** to the therapy.
+
+The fitness equation of the sensitive population will only take into account a 
+negative factor **cS** that refers to the cohabit cost. Since the space and resources
+are shared by both subpopulations, it is dependent on their density. The equation
+of the resistant population is very similar, but it also considers that their 
+fitness is negatively affected by the fact that they are resistant; in other words,
+there is a resistance cost, here referred to as **cR**. 
+
+The **fitness equations** are the following: 
+
+\begin{align}
+ W\left(S\right) = 1 - cS·\left(f_S + f_R\right)\\
+ W\left(R\right) = 1 - cS·\left(f_S + f_R\right) - cR\\
+\end{align}
+
+1. A dataframe with the different genotypes and their fitness equations was 
+generated.
+
+2. `allFitnessEffects` function was launched, which establishes the frequency 
+dependent fitness. In the three simulations we used relative frequencies.
+
+3. The model can be generated using the fitness values from `allFitnessEffect`
+function at each time running `oncoSimulIndiv`. The McFarland probabilistic
+model was used in the three simulations.
+
+```{r}
+cS <- 0.2 # cohabit cost
+cR <- 0.1 # resistance cost
+
+# Fitness equations
+S_fitness <- paste0("1 - ", cS, " * (f_S + f_R)")
+R_fitness <- paste0("1 - ", cS, " * (f_S + f_R) - ", cR)
+
+drug <- 0.01 # drug effect
+```
+**STANDARD TARGETED THERAPY:** *treatment for cure*
+```{r, message = FALSE}
+# Define fitness of the genotypes
+std_df <- function(cS, cR, gt = c("WT", "S", "R")) {
+  data.frame(Genotype = gt,
+             Fitness = c("1",
+                         paste0("if (T > 20) ", drug, "*(", S_fitness, ")",";
+                                else ", S_fitness, ";"),
+                         R_fitness),
+             stringsAsFactors = FALSE)
+}
+# Fitness effects specification
+std_eff <- allFitnessEffects(genotFitness = std_df(cS, cR), 
+                             frequencyDependentFitness = TRUE, 
+                             frequencyType = "rel")
+
+set.seed(1) # for reproducibility
+std_simul <- oncoSimulIndiv(std_eff, 
+                            model = "McFL",
+                            onlyCancer = FALSE, 
+                            mu = 0.01,
+                            finalTime = 80,
+                            initSize = c(WT=1,S=500, R=500),
+                            seed = NULL,
+                            initMutant = c("WT", "S", "R"))
+```
+**ADAPTIVE THERAPY:** *treatment for contain*
+```{r, message = FALSE}
+# Define fitness of the genotypes
+adapt_df <- function(cS, cR, gt = c("WT", "S", "R")) {
+  data.frame(Genotype = gt,
+             Fitness = c("1",
+                         paste0("if ((((T > 15) & (T < 18)) | 
+                                      ((T > 38) & (T < 41)) | 
+                                      ((T > 61) & (T < 64)))) ", 
+                                drug, "*(", S_fitness, ")",";
+                                else ", S_fitness, ";"),
+                         R_fitness),
+             stringsAsFactors = FALSE)
+}
+# Fitness effects specification
+adapt_eff <- allFitnessEffects(genotFitness = adapt_df(cS, cR), 
+                               frequencyDependentFitness = TRUE,
+                               frequencyType = "rel")
+
+set.seed(1) # for reproducibility
+adapt_simul <- oncoSimulIndiv(adapt_eff, 
+                              model = "McFL",
+                              onlyCancer = FALSE, 
+                              mu = 0.01,
+                              finalTime = 80,
+                              initSize = c(WT=1,S=500, R=500),
+                              seed = NULL,
+                              initMutant = c("WT", "S", "R"))
+```
+
+The results were represented as graphics for interpretation. The first plot 
+represents the result of the “standard therapy”. Importantly, the constant
+use of the drug drastically reduces the sensitive cells fitness, consequently 
+freeing the resistant cells from their competition, which allows their 
+uncontrolled growth. This is why in this case adaptive therapy is a better 
+approach. It is represented in second plot, where the successive
+therapy cycles allow a more controlled management of both cell subpopulations
+growth. 
+
+```{r}
+# Plot representation
+plot(std_simul, show = "genotypes", type = "line", 
+     thinData = TRUE, col = c("white", "salmon", "darkgreen"),
+     ylim = c(30, 3000), las = 1, 
+     cex.lab=1.1, main = "Standard therapy")
+
+plot(adapt_simul, show = "genotypes", type = "line", 
+     thinData = TRUE, col = c("white", "salmon", "darkgreen"),
+     ylim = c(30, 3000), las = 1, 
+     cex.lab=1.1, main = "Adaptive therapy")
+```
+
+# Management of drug resistant populations in bacteria
+
+This example is based on *Melnikov et al. (2020)*. There are 3 phenotypic groups: 
+**tavaborole-sensitive bacteria (WT)**, **tavaborole-resistant bacteria (EcoR)** and 
+**multidrug-resistant bacteria (EcoMR)**.
+
+A cohabit cost (**cS**) is considered, since WT, EcoR and EcoMR compete for resources. 
+In addition, we assume that EcoR and EcoMR have an additional resistance cost 
+(**cR** and **cMR**, respectively) due to the fact that antibiotic resistance can cause 
+growth defects that alter the fitness of resistant populations. 
+
+```{r}
+cS <- 0.2 # cohabit cost
+cR <- 0.1 # resistance cost of EcoR
+cMR <- 0.4 # resistance cost of EcoMR
+
+# Fitness equations
+WT_fitness <- paste0("1 - ", cS, " * (f_ + f_EcoR + f_EcoMR)")
+EcoR_fitness <- paste0("1 - ", cS, " * (f_ + f_EcoR + f_EcoMR) - ", cR)
+EcoMR_fitness <- paste0("1 - ", cS, " * (f_ + f_EcoR + f_EcoMR) - ", cMR)
+
+# Drug effects
+tavab <- 0.1 # tavaborole
+norvaline <- 0.7 # norvaline
+```
+
+We establish fitness as:
+
+\begin{align}
+ W\left(WT\right) = 1 - cS·\left(f_{WT} + f_{EcoR} + f_{EcoMR}\right)\\
+ W\left(EcoR\right) = 1 - cS·\left(f_{WT} + f_{EcoR} + f_{EcoMR}\right) - cR\\
+ W\left(EcoMR\right) = 1 - cS·\left(f_{WT} + f_{EcoR} + f_{EcoMR}\right) - cMR\\
+\end{align}
+
+We simulate two scenarios using two drugs (tavaborole and norvaline): **simultaneous
+standard therapy** and **adaptive therapy**. We add the effect of **tavaborole** and 
+**norvaline** as a fixed coefficient (tavab and norvaline). The fitness of the three
+populations depends on time and on the effect of both drugs: tavaborole just 
+alters WT population fitness, since the rest of strains are resistant. However,
+since resistance to tavaborole confers hypersensitivity to norvaline in the EcoR 
+strain, we assume in this model that EcoR is 3 times more sensitive to norvaline
+than the WT strain.
+
+## Scenario with simultaneous therapy (tavaborole + norvaline)
+
+When starting the simulation, just tavaborole is initially applied. After a 
+certain period of time, norvaline is added.
+
+```{r, message = FALSE}
+# Define fitness of the genotypes
+eco_df_std <- function(cS, cR, cMR, gt = c("WT", "EcoR", "EcoMR")) {
+  data.frame(Genotype = gt,
+             Fitness = c(paste0("if (T > 10) ", 
+                                tavab, "*(", WT_fitness, ")","; 
+                                else if (T > 17) ", 
+                                norvaline, "*(", WT_fitness, ")",";
+                                else ", WT_fitness, ";"),
+                         paste0("if (T > 17) ", 
+                                norvaline/3, "*(", EcoR_fitness, ")",";
+                                else ", EcoR_fitness, ";"),
+                         EcoMR_fitness),
+             stringsAsFactors = FALSE)
+}
+
+# Fitness effects specification
+eco_eff_std <- allFitnessEffects(genotFitness = eco_df_std(cS, cR, cMR), 
+                                 frequencyDependentFitness = TRUE, 
+                                 frequencyType = "rel")
+
+set.seed(4) # for reproducibility
+eco_simul_std <- oncoSimulIndiv(eco_eff_std, 
+                                model = "McFL",
+                                onlyCancer = FALSE, 
+                                mu = 0.01,
+                                initSize = 500,
+                                finalTime = 60,
+                                seed = NULL)
+```
+
+## Scenario with adaptive therapy
+
+In this case EcoMR fitness is very low, since WT and EcoR strains are not exposed
+to that high selective pressure (2 drugs at the same time). Here, the fixed 
+dosages of tavaborole and norvaline are applied consecutively, alternating with
+drug-free periods.
+
+```{r, message = FALSE}
+# Define fitness of the genotypes
+eco_df_adapt <- function(cS, cR, cMR, gt = c("WT", "EcoR", "EcoMR")) {
+  data.frame(Genotype = gt,
+             Fitness = c(paste0("if (((T > 10) & (T < 16)) | (T > 50))", 
+                                tavab, "*(", WT_fitness, ")","; 
+                                else if ((T > 35) & (T < 45))",
+                                norvaline, "*(", WT_fitness, ")", "; 
+                                else ", WT_fitness, ";"),
+                         paste0("if ((T > 35) & (T < 45)) ", 
+                                norvaline/3, "*(", EcoR_fitness, ")",";
+                                else ", EcoR_fitness, ";"),
+                         paste0(0.05, "*(", EcoMR_fitness, ")")),
+             stringsAsFactors = FALSE)
+}
+# Fitness effects specification
+eco_eff_adapt <- allFitnessEffects(genotFitness = eco_df_adapt(cS, cR, cMR), 
+                                   frequencyDependentFitness = TRUE, 
+                                   frequencyType = "rel")
+
+set.seed(4) # for reproducibility
+eco_simul_adapt <- oncoSimulIndiv(eco_eff_adapt, 
+                                  model = "McFL",
+                                  onlyCancer = FALSE, 
+                                  mu = 0.01,
+                                  finalTime = 60,
+                                  initSize = 500, 
+                                  seed = NULL)
+```
+
+## Standard vs. adaptive therapy
+
+Whereas in standard therapy WT and EcoR populations disappear, leaving the
+emergent multidrug-resistant bacteria proliferate, in adaptive therapy 
+sensitive and resistant bacteria coexist during the treatment in an equilibrium.
+
+The comparison of both approaches proves that shorter and non-simultaneous 
+treatment (adaptive therapy) is beneficial to control resistant populations
+and to avoid multidrug-resistance evolution. 
+
+```{r}
+# Plot representation
+op <- par(mfrow = c(1, 2))
+
+plot(eco_simul_std, show = "genotypes", type = "line", 
+     thinData = TRUE, col = c("darkgreen", "blue", "salmon"),
+     las = 1, ylim = c(1, 9000),
+     cex.lab=1.1, main = "Standard therapy")
+
+plot(eco_simul_adapt, show = "genotypes", type = "line", 
+     thinData = TRUE, col = c("darkgreen", "blue", "salmon"),
+     las = 1, ylim = c(1, 9000),
+     cex.lab=1.1, main = "Adaptive therapy")
+```
+
+# Adaptive therapy in resistant prostate cancer
+
+This example is based on *West et al. (2020)*. It describes a case of standard vs
+adaptive therapy applied to three types of cells of terminal prostate cancer. 
+
+Within the prostate tumour there is a variety of subpopulations, each one with
+different resistance profiles to androgen deprivation therapy. These three 
+populations are defined as **wild type or testosterone sensitive (WT)**, 
+**testosterone producing (TP)** and **testosterone resistant (TR)** tumour cells. 
+Both the fitness of the WT and TP are positively affected by the testosterone 
+produced by the TP, which is modelled by introducing a benefit factor hereafter 
+referred to as **bT**. Several negative factors were also included in the equations. 
+TP cells fitness is negatively affected by the cost of producing testosterone (**cT**),
+while TR cells fitness is reduced by the influence of a resistance cost (**cR**). 
+Lastly, the three cell types are influenced by a cohabit cost factor (**cS**). 
+The benefit of systemic testosterone was not added to the equation as it will be
+a therapy target later in this example. The capacity of TP cells to support WT
+cells was adjusted in order to reflect the proportions stated in the article.
+
+Fitness equations were described as follows:
+
+\begin{align}
+ W\left(WT\right) = 1 + bT·\left(f_{TP}\right) - cS·\left(f_{WT} + f_{TP} + f_{TR}\right)\\
+ W\left(TP\right) = 1 + bT·\left(f_{TP}\right) - cS·\left(f_{WT} + f_{TP} + f_{TR}\right) - cT\\
+ W\left(TR\right) = 1 - cS·\left(f_{WT} + f_{TP} + f_{TR}\right) - cR\\
+\end{align}
+
+```{r}
+bT <- 0.7 # benefit of TP producing testosterone
+cS <- 0.2 # cohabit cost 
+cT <- 0.3 # testosterone production cost
+cR <- 0.3 # resistance cost
+
+# Fitness equations
+WT_fitness <- paste0("1 + ", bT, " * (f_TP) - ", cS, " * (f_ + f_TP + f_TR)")
+TP_fitness <- paste0("1 + ", bT, " * (f_TP) - ", cS, " * (f_ + f_TP + f_TR) - ", cT)
+TR_fitness <- paste0("1 - ", cS, " * (f_ + f_TP + f_TR) - ", cR)
+```
+
+## Scenario without treatment
+
+Firstly, aiming to the analysis of the interactions of all the cell types, an 
+initial simulation without any treatment and starting with the same population
+size of each cell type was performed. Results are shown in the graph below, 
+where noticeably **most of the cells are WT**. The other cell populations are 
+stable in reduced numbers.
+
+```{r, message = FALSE}
+# Define fitness of the genotypes
+prost_df <- function(bT, cS, cT, cR, gt = c("WT", "TP", "TR")) {
+  data.frame(Genotype = gt,
+             Fitness = c(WT_fitness,
+                         TP_fitness,
+                         TR_fitness),
+             stringsAsFactors = FALSE)
+}
+
+# Fitness effects specification
+prost_eff <- allFitnessEffects(genotFitness = prost_df(bT, cS, cT, cR), 
+                               frequencyDependentFitness = TRUE, 
+                               frequencyType = "rel")
+
+set.seed(4) # for reproducibility
+prost_simul <- oncoSimulIndiv(prost_eff, 
+                              model = "McFL",
+                              onlyCancer = FALSE, 
+                              mu = 0.01,
+                              finalTime = 100,
+                              initSize = c(WT=500, TP=500, TR=500),
+                              seed = NULL,
+                              initMutant = c("WT", "TP", "TR"))
+```
+
+```{r}
+# Plot representation
+plot(prost_simul, show = "genotypes", type = "line", 
+     thinData = TRUE, col = c("darkgreen", "blue", "salmon"), 
+     ylim = c(5, 20000), las = 1,
+     cex.lab=1.1, main = "Without therapy")
+```
+
+## Adaptive therapy scenario
+
+```{r triangles, echo=FALSE, out.width="90%", out.height="90%", fig.cap="West et al. (2020). Temporal dynamics under therapy."}
+knitr::include_graphics("figures/dynamics.png")
+```
+
+Next, the adaptive therapy scenario was simulated. This strategy is represented
+in the graph below, where the **effects of one single treatment cycle** are shown. 
+Each cycle is composed of three consecutive phases: lupron treatment, no-treatment
+and simultaneous treatment with lupron and abiraterone. Starting from a baseline 
+condition, **lupron treatment** effect was included in the model from time unit 
+20 to 70. Since lupron inhibits the systemic testosterone production, during this 
+period WT cells fitness is dramatically reduced as they require testosterone for
+growth. However, since TP cells produce testosterone by their own, they are 
+favoured under this condition, which at the same time implies a competition 
+increase against TR cells, fitness of which decreases. Then, a 
+**short drug-free period** (during 3 time units) partially reverses the latter 
+effects. Finally, the **combination of Lupron and abiraterone** (from time unit
+73) favours the testosterone independent (TR) population, as both systemic and 
+TP produced testosterone sources are inhibited. 
+
+```{r cycles, echo=FALSE,  out.width="90%", out.height="90%", fig.cap="West et al. (2020). Sequential treatments which lead to an evolutionary cycle."}
+knitr::include_graphics("figures/adaptive-cycles.png")
+```
+
+These treatment phases can be repeated, controlling the tumour in cycles. By the 
+appropriate treatment "switching", these three cell types remain in competition with 
+each other, avoiding the emergence of resistance.
+
+```{r, message = FALSE}
+# Drug effects
+lupron_eff <- 0.6
+abir_eff <- 0.8
+
+# Define fitness of the genotypes
+prost_2drugs <- function(bT, cS, cT, cR, gt = c("WT", "TP", "TR")) {
+  data.frame(Genotype = gt,
+             Fitness = c(paste0("if ((T > 20) & (T < 70)) ", lupron_eff, 
+                                "*(", WT_fitness, ")",";
+                                else if ((T > 73) & (T < 210)) ", lupron_eff, 
+                                "*(", WT_fitness, ")", ";
+                                else ", WT_fitness, ";"),
+                         paste0("if ((T > 20) & (T < 70)) ", lupron_eff*1.5, 
+                                "*(", TP_fitness, ")",";
+                                else if ((T > 73) & (T < 210))", 
+                                abir_eff*lupron_eff*1.5, "*(", TP_fitness, ")", ";
+                                else ", TP_fitness, ";"),
+                         TR_fitness),
+             stringsAsFactors = FALSE)
+}
+
+# Fitness effects specification
+prost_eff <- allFitnessEffects(genotFitness = prost_2drugs(bT, cS, cT, cR), 
+                               frequencyDependentFitness = TRUE, 
+                               frequencyType = "rel")
+
+set.seed(4) # for reproducibility
+prost_simul <- oncoSimulIndiv(prost_eff, model = "McFL",
+                              onlyCancer = FALSE, 
+                              mu = 0.01,
+                              finalTime = 210,
+                              initSize = c(WT=500, TP=500, TR=500),
+                              seed = NULL,
+                              initMutant = c("WT", "TP", "TR"))
+```
+
+```{r}
+# Plot representation
+plot(prost_simul, show = "genotypes", type = "line", 
+     thinData = TRUE, col = c("darkgreen", "blue", "salmon"), 
+     ylim = c(5, 20000), las = 1,
+     cex.lab=1.1, main = "Adaptive therapy")
+```
+
+# OncoSimulR limitations
+
+1. It would be interesting to be able to adjust the therapy intervals by a 
+biomarker level (**Prostate Specific Antigen** in the case of *West et al. 2020*)
+apart from using time (T) or population size (N) in order to optimize the 
+treatment of a tumor. We could not find a way to simulate the production levels
+of this biomarker.
+
+2. When establishing just 2 populations in the model the function 
+`allFitnessEffects` yields an error: *dim(X) must have a positive length*
+
+```{r}
+cS <- 0.2 # cohabit cost
+cR <- 0.1 # resistance cost
+
+# Fitness equations
+S_fitness <- paste0("1 - ", cS, " * (f_S + f_R)")
+R_fitness <- paste0("1 - ", cS, " * (f_S + f_R) - ", cR)
+
+drug <- 0.01 # drug effect
+
+# Define fitness of the genotypes
+std_df <- function(cS, cR, gt = c("WT", "R")) {
+  data.frame(Genotype = gt,
+             Fitness = c(paste0("if (T > 20) ", drug, "*(", S_fitness, ")",";
+                                else ", S_fitness, ";"),
+                         R_fitness),
+             stringsAsFactors = FALSE)
+}
+# Fitness effects specification
+# std_eff <- allFitnessEffects(genotFitness = std_df(cS, cR), 
+#                             frequencyDependentFitness = TRUE, 
+#                             frequencyType = "rel")
+
+# Error in apply(m[, 1:length(all_genes)], 2, as.numeric) : dim(X) must have a positive length
+```
+
+# References
+
+1. Melnikov, S. V., Stevens, D. L., Fu, X., Kwok, H. S., Zhang, J.-T., Shen, Y.,
+Sabina, J., Lee, K., Lee, H., & Söll, D. (2020). Exploiting evolutionary 
+trade-offs for posttreatment management of drug-resistant populations. Proceedings
+of the National Academy of Sciences, 117(30), 17924–17931. 
+https://doi.org/10.1073/pnas.2003132117
+
+2. West J., You L., Zhang J., Gatenby R. A., Brown J. S., Newton P. K., 
+Anderson A. R. A. (2020). Towards Multidrug Adaptive Therapy. Cancer Research,
+80(7), 1578-1589. https://doi.org/10.1158/0008-5472.CAN-19-2669
